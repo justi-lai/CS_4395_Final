@@ -11,9 +11,9 @@ from methods.rag import rag
 from methods.graphrag import graphrag
 import re
 
-MAX_TOKENS = 3000
-
 def main():
+    chunk_size = 500
+
     parser = argparse.ArgumentParser(description="""
             This script runs various retrieval methods on the NarrativeQA dataset.
             The methods include truncation, chunking, summarization, RAG, and GraphRAG.
@@ -30,6 +30,7 @@ def main():
             python main.py --method <method_name> [--data <data_file>]
             """)
     parser.add_argument('--method', required=True, help="Specify the retrieval method to use.")
+    parser.add_argument('--chunk', type=int, default=chunk_size, help="Specify the maximum number of tokens (default: 500).")
     parser.add_argument('--data', required=False, help="Specify the data file (optional).")
     
     args = parser.parse_args()
@@ -47,9 +48,9 @@ def main():
         if not os.path.exists(data_path):
             load_data(data_path)
     
-    run_method(args.method, data_path)
+    run_method(args.method, data_path, args.chunk)
 
-def run_method(method, data_path):
+def run_method(method, data_path, chunk_size):
     method = method.lower()
     methods = ('truncation', 'chunking', 'summarization', 'rag', 'graphrag')
 
@@ -62,15 +63,15 @@ def run_method(method, data_path):
     df = None
     
     if method == 'truncation':
-        df = truncation(data_path, max_tokens=MAX_TOKENS)
+        df = truncation(data_path)
     elif method == 'chunking':
-        df = chunking(data_path, max_tokens=MAX_TOKENS)
+        df = chunking(data_path, chunk_size=chunk_size)
     elif method == 'summarization':
-        df = summarization(data_path, max_tokens=MAX_TOKENS)
+        df = summarization(data_path, chunk_size=chunk_size)
     elif method == 'rag':
-        df = rag(data_path, max_tokens=MAX_TOKENS)
+        df = rag(data_path, chunk_size=chunk_size)
     elif method == 'graphrag':
-        df = graphrag(data_path, max_tokens=MAX_TOKENS)
+        df = graphrag(data_path, chunk_size=chunk_size)
     else:
         raise ValueError(f"Method '{method}' is not implemented.")
     
