@@ -4,12 +4,9 @@ from huggingface_hub import login
 from dotenv import load_dotenv
 import os
 import torch
+import numpy as np
 
 MODEL_ID = "google/gemma-2-2b-it"
-USE_4_BIT = False
-USE_8_BIT = True
-BASE_URL = "http://localhost:1234/v1"
-API_KEY = "lm-studio"
 DEFAULT_SYSTEM_PROMPT = """
 You are a helpful assistant. Answer the question concisely and in a friendly manner.
 Please provide the correct answer based on the context given below.
@@ -31,7 +28,7 @@ Answer:
 MAX_TOKENS = 500
 
 class OpenAIClient:
-    def __init__(self, system_prompt=None, model_id=MODEL_ID, base_url=BASE_URL, api_key=API_KEY, tokenizer="google/gemma-2-2b-it"):
+    def __init__(self, system_prompt=None, model_id=MODEL_ID, tokenizer="google/gemma-2-2b-it"):
         load_dotenv()
         login(token=os.getenv("HUGGINGFACE_TOKEN"))
 
@@ -74,12 +71,9 @@ def split_document(text, chunk_size, overlap):
     Returns:
         list: A list of text chunks.
     """
-    # Convert numpy array to string if needed
-    import numpy as np
     if isinstance(text, np.ndarray):
         if text.size == 0:
             return []
-        # Join array elements if it's an array of strings
         if isinstance(text[0], str):
             text = ' '.join(text)
         else:
@@ -87,7 +81,6 @@ def split_document(text, chunk_size, overlap):
     elif not isinstance(text, str):
         text = str(text)
     
-    # Now split the text into tokens
     tokens = text.split()
     chunks = []
     

@@ -80,15 +80,11 @@ def sorting_by_similarity(chunks, query_embedding, embedding_model):
     
     chunk_embeddings = embedding_model.encode(chunks, convert_to_tensor=True)
     
-    # Fix: Ensure query_embedding has correct shape for similarity calculation
-    # If query_embedding is 1D, reshape it to 2D (1 x embedding_size)
     if len(query_embedding.shape) == 1:
         query_embedding = query_embedding.reshape(1, -1)
     
-    # Calculate similarity
     similarities = util.pytorch_cos_sim(query_embedding, chunk_embeddings)[0]
-    
-    # Sort chunks by similarity
+
     sorted_indices = similarities.argsort(descending=True).tolist()
     sorted_chunks = [chunks[i] for i in sorted_indices]
 

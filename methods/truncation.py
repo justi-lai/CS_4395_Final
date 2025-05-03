@@ -40,10 +40,8 @@ def truncation(data_path):
         }
         processed_data.append(processed_example)
 
-    # Convert to pandas DataFrame
     output_df = pd.DataFrame(processed_data)
     
-    # Save to CSV
     output_path = data_path.replace("/", "_").split(".")[0] + "_truncated.csv"
     output_df.to_csv(output_path, index=False)
     print(f"Truncated data saved to {output_path}")
@@ -77,14 +75,13 @@ def create_truncated_dataset(dataset, client):
     Returns:
         Dataset: A new dataset with truncated documents.
     """
-    # Apply truncation to each example in the dataset
+    
     truncated_data = []
     for example in dataset:
         truncated_doc = truncate_text(example['document'], client)
         example['truncated_document'] = truncated_doc
         truncated_data.append(example)
     
-    # Convert to DataFrame and then to HuggingFace Dataset
     df = pd.DataFrame(truncated_data)
     truncated_dataset = Dataset.from_pandas(df)
     
@@ -100,27 +97,21 @@ def truncate_text(text, client, max_tokens=500):
         client (OpenAIClient): The OpenAI client instance for tokenization.
         max_tokens (int): Maximum number of tokens to keep from the end of the document.
     """
-    # Handle different text input types
     if isinstance(text, list):
         text = " ".join(text)
     elif not isinstance(text, str):
         raise ValueError("Input must be a string or a list of strings.")
-    
-    # Encode the text to tokens
+
     tokens = client.encode(text, add_special_tokens=False)
-    
-    # Calculate available tokens
-    prompt_token_count = 100  # Estimate for prompt tokens
+
+    prompt_token_count = 100
     model_max_tokens = client.get_max_tokens()
-    available_tokens = model_max_tokens - prompt_token_count - 100  # Buffer
+    available_tokens = model_max_tokens - prompt_token_count - 100
     
-    # Limit to either max_tokens or available_tokens, whichever is smaller
     token_limit = min(max_tokens, available_tokens)
     
-    # Take the last token_limit tokens
     if len(tokens) > token_limit:
         tokens = tokens[-token_limit:]
     
-    # Decode back to text
     truncated_text = client.decode(tokens, skip_special_tokens=True)
     return truncated_text

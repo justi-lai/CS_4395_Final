@@ -4,6 +4,7 @@ from datasets import load_from_disk, Dataset
 from sentence_transformers import SentenceTransformer, util
 from methods.utils import OpenAIClient, split_document
 from tqdm import tqdm
+import os
 
 CHUNKS_USED = 2
 
@@ -38,12 +39,9 @@ def summarization(data_path, chunk_size=300, overlap=100):
         response = client.generate_response(question, context)
         df.at[index, 'response'] = response
     
-    # Fix: Generate a valid output path
-    import os
     base_name = os.path.basename(data_path)
     output_path = os.path.join(os.path.dirname(data_path), f"{base_name.split('.')[0]}_summarized.csv")
     
-    # If data_path is a directory, create a filename based on the directory name
     if os.path.isdir(data_path):
         dir_name = os.path.basename(data_path)
         output_path = os.path.join(os.path.dirname(data_path), f"{dir_name}_summarized.csv")
