@@ -7,4 +7,4 @@ __pycache__/
 *$py.class
 
 # Ignore everything inside the data folder
-data/
+data/*

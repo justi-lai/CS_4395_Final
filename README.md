@@ -67,9 +67,6 @@ python main.py --method summarization --chunk 750
 ```
 ├── main.py              # Main script for running experiments
 ├── data/                # Dataset files
-│   ├── narrative_qa.csv               # Original dataset
-│   ├── narrative_qa_truncated.csv     # Results from truncation method
-│   └── narrative_qa_summarized.csv    # Results from summarization method
 └── methods/             # Implementation of retrieval methods
     ├── truncation.py    # Simple truncation approach
     ├── chunking.py      # Document chunking
