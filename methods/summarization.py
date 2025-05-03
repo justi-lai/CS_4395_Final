@@ -1,9 +1,13 @@
 import pandas as pd
 from transformers import pipeline
+from datasets import load_from_disk, Dataset
 from sentence_transformers import SentenceTransformer, util
-from methods.utils import OpenAIClient
+from methods.utils import OpenAIClient, split_document
+from tqdm import tqdm
 
-def summarization(data_path, chunk_size=500, overlap=100):
+CHUNKS_USED = 2
+
+def summarization(data_path, chunk_size=300, overlap=100):
     """
     Summarization method for text data.
     
@@ -14,49 +18,40 @@ def summarization(data_path, chunk_size=500, overlap=100):
     Returns:
         pd.DataFrame: DataFrame containing the summarized text.
     """
+    tqdm.pandas()
 
-    df = pd.read_csv(data_path)
+    df = load_from_disk(data_path)
+    df = df.to_pandas()
     
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
+    print("Summarizing documents...")
     df = build_summary_index(df, summarizer, chunk_size, overlap)
 
     client = OpenAIClient()
-    client.set_system_prompt("You are a helpful assistant. You will be given a question and a context. Your task is to answer the question based on the context provided.")
-
+    
     for index, row in df.iterrows():
         question = row['question']
-        top_summaries = row['summaries'][:2] if len(row['summaries']) >= 2 else row['summaries']
+        top_summaries = row['summaries'][:CHUNKS_USED] if len(row['summaries']) >= CHUNKS_USED else row['summaries']
         context = " ".join(top_summaries)
         
         response = client.generate_response(question, context)
         df.at[index, 'response'] = response
     
-    output_path = data_path.replace('.csv', '_summarized.csv')
+    # Fix: Generate a valid output path
+    import os
+    base_name = os.path.basename(data_path)
+    output_path = os.path.join(os.path.dirname(data_path), f"{base_name.split('.')[0]}_summarized.csv")
+    
+    # If data_path is a directory, create a filename based on the directory name
+    if os.path.isdir(data_path):
+        dir_name = os.path.basename(data_path)
+        output_path = os.path.join(os.path.dirname(data_path), f"{dir_name}_summarized.csv")
+    
     df.to_csv(output_path, index=False)
     print(f"Summarized data saved to {output_path}")
 
     return df
-
-def split_document(text, chunk_size, overlap):
-    """
-    Splits the document into chunks of specified size.
-    
-    Args:
-        text (str): The input text to be split.
-        chunk_size (int): The size of each chunk.
-        overlap (int): The number of overlapping tokens between chunks.
-    Returns:
-        list: A list of text chunks.
-    """
-    tokens = text.split()
-    chunks = []
-    
-    for i in range(0, len(tokens), chunk_size - overlap):
-        chunk = " ".join(tokens[i:i + chunk_size])
-        chunks.append(chunk)
-    
-    return chunks
 
 def summarize_chunks(chunks, summarizer):
     """
@@ -103,10 +98,13 @@ def build_summary_index(df, summarizer, chunk_size, overlap):
         pd.DataFrame: DataFrame containing the summarized text and original text.
     """
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    df['chunks'] = df['document'].apply(lambda x: split_document(x, chunk_size, overlap))
-    df['summaries'] = df['chunks'].apply(lambda x: summarize_chunks(x, summarizer))
-    df['summaries'] = df.apply(lambda row: sort_summaries(row['question'], row['summaries'], embedding_model), axis=1)
+    
+    print("\tSplitting documents into chunks...")
+    df['chunks'] = df['document'].progress_apply(lambda x: split_document(x, chunk_size, overlap))
+    print("\tGenerating summaries for the chunks...")
+    df['summaries'] = df['chunks'].progress_apply(lambda x: summarize_chunks(x, summarizer))
+    print("\tSorting summaries based on similarity to the question...")
+    df['summaries'] = df.progress_apply(lambda row: sort_summaries(row['question'], row['summaries'], embedding_model), axis=1)
     
     return df
 

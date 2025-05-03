@@ -1,14 +1,16 @@
 import argparse
 import os
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, Dataset
 from huggingface_hub import login
 from dotenv import load_dotenv
 import pandas as pd
 from methods.truncation import truncation
-from methods.chunking import chunking
 from methods.summarization import summarization
 from methods.rag import rag
 from methods.graphrag import graphrag
+from bert_score import score
+import sacrebleu
+from rouge_score import rouge_scorer
 import re
 
 def main():
@@ -16,7 +18,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="""
             This script runs various retrieval methods on the NarrativeQA dataset.
-            The methods include truncation, chunking, summarization, RAG, and GraphRAG.
+            The methods include truncation, summarization, RAG, and GraphRAG.
             If no data file is specified, it will load a sample dataset.
             The script requires a Hugging Face token in the .env file for authentication.
             \n\n
@@ -44,15 +46,15 @@ def main():
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"The file '{args.data}' does not exist in the data directory.")
     else:
-        data_path = os.path.join(data_path, "narrative_qa.csv")
-        if not os.path.exists(data_path):
+        if not os.path.exists(os.path.join(data_path, "narrativeqa_arrow")):
             load_data(data_path)
+        data_path = os.path.join(data_path, "narrativeqa_arrow")
     
     run_method(args.method, data_path, args.chunk)
 
 def run_method(method, data_path, chunk_size):
     method = method.lower()
-    methods = ('truncation', 'chunking', 'summarization', 'rag', 'graphrag')
+    methods = ('truncation', 'summarization', 'rag', 'graphrag')
 
     if method not in methods:
         raise ValueError(f"Invalid method '{method}'. Choose from {methods}.")
@@ -64,8 +66,6 @@ def run_method(method, data_path, chunk_size):
     
     if method == 'truncation':
         df = truncation(data_path)
-    elif method == 'chunking':
-        df = chunking(data_path, chunk_size=chunk_size)
     elif method == 'summarization':
         df = summarization(data_path, chunk_size=chunk_size)
     elif method == 'rag':
@@ -92,32 +92,48 @@ def evaluate(df):
     For example, you might want to calculate accuracy, precision, recall, etc.
     """
     
-    print("Evaluating the results...")
+    print("\n========== Evaluating the results... ==========")
     
     # Check if the DataFrame has the required columns
-    required_cols = ['answer', 'response']
+    required_cols = ['answers', 'response']
     if not all(col in df.columns for col in required_cols):
+        print(f"Available columns: {df.columns.tolist()}")
         raise ValueError(f"DataFrame must contain columns: {required_cols}")
     
     # Initialize metrics
     precision_scores = []
     recall_scores = []
     f1_scores = []
+    bleu_scores = []
+    rouge1_scores = []
+    rouge2_scores = []
+    rougeL_scores = []
+    
+    # Initialize Rouge scorer
+    rouge_scorer_instance = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+    
     # Use the tokenize function to handle punctuation properly
-    for _, row in df.iterrows():
-        # Convert answer list to a set of tokenized words
-        if isinstance(row['answer'], list):
+    for i, row in df.iterrows():
+        # Extract and tokenize the ground truth answers
+        if isinstance(row['answers'], list):
             # Flatten all answers into one set of tokens
             ground_truth_words = set()
-            for ans in row['answer']:
+            for ans in row['answers']:
                 ground_truth_words.update(tokenize(ans))
         else:
-            ground_truth_words = tokenize(row['answer'])
+            ground_truth_words = tokenize(str(row['answers']))
         
-        # Convert response to a set of tokenized words
-        response_words = tokenize(row['response']) if not pd.isna(row['response']) else set()
+        # Extract and tokenize the model's response
+        response = row['response']
+        if isinstance(response, list):
+            # If it's a list, join all responses into one string
+            response_text = " ".join([str(r) for r in response if r is not None and not (isinstance(r, float) and pd.isna(r))])
+            response_words = tokenize(response_text)
+        else:
+            # Handle single value response
+            response_words = tokenize(str(response)) if response is not None else set()
         
-        # Calculate metrics
+        # Calculate precision and recall
         if len(response_words) == 0:
             precision = 0
         else:
@@ -137,55 +153,173 @@ def evaluate(df):
         precision_scores.append(precision)
         recall_scores.append(recall)
         f1_scores.append(f1)
+        
+        # Calculate BLEU score
+        if isinstance(row['answers'], list):
+            # Use all answers as references for BLEU calculation
+            references = [ans.split() for ans in row['answers'] if isinstance(ans, str)]
+            if not references:
+                references = [["placeholder"]]  # Avoid empty references
+        else:
+            # Convert to string and split for single answer
+            reference_str = str(row['answers'])
+            references = [reference_str.split()]
+        
+        # Convert response to list of tokens for BLEU calculation
+        candidate = str(response).split() if response is not None else [""]
+        
+        # Calculate BLEU score
+        if references and candidate:
+            bleu = sacrebleu.sentence_bleu(" ".join(candidate), [" ".join(ref) for ref in references]).score / 100
+        else:
+            bleu = 0
+        bleu_scores.append(bleu)
+        
+        # Calculate ROUGE scores
+        if isinstance(row['answers'], list) and row['answers']:
+            # Use the first answer for ROUGE calculation
+            reference_text = row['answers'][0] if isinstance(row['answers'][0], str) else ""
+        else:
+            reference_text = str(row['answers'])
+        
+        # Handle response for ROUGE calculation
+        candidate_text = str(response) if response is not None else ""
+        
+        if reference_text and candidate_text:
+            rouge_scores = rouge_scorer_instance.score(reference_text, candidate_text)
+            rouge1_scores.append(rouge_scores['rouge1'].fmeasure)
+            rouge2_scores.append(rouge_scores['rouge2'].fmeasure)
+            rougeL_scores.append(rouge_scores['rougeL'].fmeasure)
+        else:
+            rouge1_scores.append(0)
+            rouge2_scores.append(0)
+            rougeL_scores.append(0)
     
     # Compute average metrics
-    avg_precision = sum(precision_scores) / len(precision_scores)
-    avg_recall = sum(recall_scores) / len(recall_scores)
-    avg_f1 = sum(f1_scores) / len(f1_scores)
-    
+    avg_precision = sum(precision_scores) / len(precision_scores) if precision_scores else 0
+    avg_recall = sum(recall_scores) / len(recall_scores) if recall_scores else 0
+    avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0
+    avg_bleu = sum(bleu_scores) / len(bleu_scores) if bleu_scores else 0
+    avg_rouge1 = sum(rouge1_scores) / len(rouge1_scores) if rouge1_scores else 0
+    avg_rouge2 = sum(rouge2_scores) / len(rouge2_scores) if rouge2_scores else 0
+    avg_rougeL = sum(rougeL_scores) / len(rougeL_scores) if rougeL_scores else 0
+
+    # Prepare for BERTScore calculation
+    references = []
+    candidates = []
+
+    for _, row in df.iterrows():
+        # Extract reference answer
+        if isinstance(row['answers'], list):
+            reference = row['answers'][0] if row['answers'] else ""
+        else:
+            reference = str(row['answers'])
+        
+        # Extract model response
+        candidate = str(row['response']) if row['response'] is not None else ""
+        
+        references.append(reference)
+        candidates.append(candidate)
+
+    # Calculate BERTScore (if we have valid references and candidates)
+    if all(references) and all(candidates):
+        P, R, F1 = score(candidates, references, lang="en", verbose=True)
+        
+        # Convert to Python lists
+        bert_precision = P.tolist()
+        bert_recall = R.tolist()
+        bert_f1 = F1.tolist()
+        
+        # Calculate average BERTScore
+        avg_bert_precision = sum(bert_precision) / len(bert_precision)
+        avg_bert_recall = sum(bert_recall) / len(bert_recall)
+        avg_bert_f1 = sum(bert_f1) / len(bert_f1)
+    else:
+        print("Warning: Could not calculate BERTScore due to empty references or candidates")
+        avg_bert_precision = 0
+        avg_bert_recall = 0
+        avg_bert_f1 = 0
+
+    print()
     print(f"Evaluation Results:")
     print(f"Average Precision: {avg_precision:.4f}")
     print(f"Average Recall: {avg_recall:.4f}")
     print(f"Average F1 Score: {avg_f1:.4f}")
+    print()
+    
+    print(f"BLEU and ROUGE Results:")
+    print(f"Average BLEU Score: {avg_bleu:.4f}")
+    print(f"Average ROUGE-1 F1: {avg_rouge1:.4f}")
+    print(f"Average ROUGE-2 F1: {avg_rouge2:.4f}")
+    print(f"Average ROUGE-L F1: {avg_rougeL:.4f}")
+    print()
+
+    print(f"BERTScore Results:")
+    print(f"Average BERTScore Precision: {avg_bert_precision:.4f}")
+    print(f"Average BERTScore Recall: {avg_bert_recall:.4f}")
+    print(f"Average BERTScore F1: {avg_bert_f1:.4f}")
+    print()
+
+    print("Example Output:")
+    for i in range(min(3, len(df))):
+        print(f"Question: {df['question'].iloc[i]}")
+        print(f"Answer: {df['answers'].iloc[i]}")
+        print(f"Response: {df['response'].iloc[i]}")
+        print("-" * 50)
     
     return {
         'precision': avg_precision,
         'recall': avg_recall,
         'f1': avg_f1,
+        'bleu': avg_bleu,
+        'rouge1': avg_rouge1,
+        'rouge2': avg_rouge2,
+        'rougeL': avg_rougeL,
+        'bert_precision': avg_bert_precision,
+        'bert_recall': avg_bert_recall,
+        'bert_f1': avg_bert_f1,
         'individual_scores': {
             'precision': precision_scores,
             'recall': recall_scores,
-            'f1': f1_scores
+            'f1': f1_scores,
+            'bleu': bleu_scores,
+            'rouge1': rouge1_scores,
+            'rouge2': rouge2_scores,
+            'rougeL': rougeL_scores
         }
     }
 
 def load_data(data_path):
     ds = load_dataset("deepmind/narrativeqa", split="test")
-    # small_sample = ds.shuffle(seed=42).select(range(10))
     small_sample = ds.select(range(10))
     
-    processed_data = []
+    small_sample = small_sample.map(transform_document, batched=False, remove_columns=small_sample.column_names)
+    small_sample = small_sample.rename_column("document_text", "document")
+    small_sample = small_sample.rename_column("question_text", "question")
+    small_sample = small_sample.rename_column("answer_text", "answers")
+
+    path = os.path.join(data_path, "narrativeqa_arrow")
+
+    small_sample.save_to_disk(path)
     
-    for item in small_sample:
-        doc_text = item['document']['text']
-        
-        question_text = item['question']['text']
+    print(f"NarrativeQA saved to {path}.")
 
-        answer_text = [answer['text'] for answer in item['answers']]
-        
-        processed_data.append({
-            'document': doc_text,
-            'question': question_text,
-            'answer': answer_text
-        })
+def transform_document(document):
+    """
+    Transforms a single example from the original nested format
+    to the desired flat format, handling multiple answers.
+    """
+    doc_text = document['document']['text']
+    q_text = document['question']['text']
+    ans_texts = [answer['text'] for answer in document['answers']]
 
-    df = pd.DataFrame(processed_data)
-
-    os.makedirs(os.path.dirname(data_path), exist_ok=True)
-
-    df.to_csv(data_path, index=False)
-    
-    print(f"NarrativeQA loaded and saved to {data_path}.")
+    num_answers = len(ans_texts)
+    output = {
+        'document_text': [doc_text] * num_answers,
+        'question_text': [q_text] * num_answers,
+        'answer_text': ans_texts
+    }
+    return output
 
 if __name__ == "__main__":
     main()
