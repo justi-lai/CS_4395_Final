@@ -1,2 +1,3 @@
-def graphrag(data_path, max_tokens):
+def graphrag(data_path):
     print("GraphRAG method is not implemented yet.")
+    return None

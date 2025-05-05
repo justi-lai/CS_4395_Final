@@ -7,14 +7,16 @@ from tqdm import tqdm
 import os
 
 CHUNKS_USED = 2
+BATCH_SIZE = 4  # Adjust based on your GPU memory
 
-def summarization(data_path, chunk_size=300, overlap=100):
+def summarization(data_path, chunk_size=300, overlap=50):
     """
     Summarization method for text data.
     
     Args:
         data_path (str): Path to the input data file.
-        max_tokens (int): Maximum number of tokens for the summarization.
+        chunk_size (int): Maximum number of tokens for each chunk.
+        overlap (int): Number of overlapping tokens between chunks.
     
     Returns:
         pd.DataFrame: DataFrame containing the summarized text.
@@ -31,13 +33,42 @@ def summarization(data_path, chunk_size=300, overlap=100):
 
     client = OpenAIClient()
     
+    print("Generating responses in batches...")
+    
+    # Prepare batches of questions and contexts
+    questions_contexts = []
     for index, row in df.iterrows():
         question = row['question']
         top_summaries = row['summaries'][:CHUNKS_USED] if len(row['summaries']) >= CHUNKS_USED else row['summaries']
         context = " ".join(top_summaries)
+        questions_contexts.append((question, context))
+    
+    # Process in batches
+    all_responses = []
+    for i in tqdm(range(0, len(questions_contexts), BATCH_SIZE), desc="Processing batches"):
+        batch = questions_contexts[i:i+BATCH_SIZE]
         
-        response = client.generate_response(question, context)
-        df.at[index, 'response'] = response
+        try:
+            # Generate responses for the batch
+            batch_responses = client.batch_generate_responses(batch, batch_size=BATCH_SIZE)
+            all_responses.extend(batch_responses)
+        except Exception as e:
+            print(f"Error in batch processing: {e}")
+            print("Falling back to individual processing...")
+            
+            # Fall back to individual processing
+            for question, context in batch:
+                try:
+                    response = client.generate_response(question, context)
+                    all_responses.append(response)
+                except Exception as e:
+                    print(f"Error generating response: {e}")
+                    all_responses.append("I couldn't find a good answer to this question.")
+    
+    # Update the DataFrame with responses
+    for index, response in enumerate(all_responses):
+        if index < len(df):
+            df.at[index, 'response'] = response
     
     base_name = os.path.basename(data_path)
     output_path = os.path.join(os.path.dirname(data_path), f"{base_name.split('.')[0]}_summarized.csv")

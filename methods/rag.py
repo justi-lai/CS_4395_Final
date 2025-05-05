@@ -2,10 +2,12 @@ import pandas as pd
 from datasets import load_from_disk, Dataset
 from methods.utils import OpenAIClient, split_document
 from sentence_transformers import SentenceTransformer, util
+from tqdm import tqdm
 
 CHUNKS_USED = 2
+BATCH_SIZE = 4  # Adjust based on your GPU memory
 
-def rag(data_path, chunk_size=300, overlap=100):
+def rag(data_path, chunk_size=300, overlap=50):
     """
     RAG (Retrieval-Augmented Generation) method for text data.
     
@@ -26,14 +28,42 @@ def rag(data_path, chunk_size=300, overlap=100):
     print("Building vector index...")
     df = build_vector_index(df, chunk_size, overlap)
     
-    print("Generating responses...")
+    print("Generating responses in batches...")
+    
+    # Prepare batches of questions and contexts
+    questions_contexts = []
     for index, row in df.iterrows():
         question = row['question']
         top_chunks = row['chunks'][:CHUNKS_USED] if len(row['chunks']) >= CHUNKS_USED else row['chunks']
         context = "\n\n".join(top_chunks)
-
-        response = client.generate_response(question, context)
-        df.at[index, 'response'] = response
+        questions_contexts.append((question, context))
+    
+    # Process in batches
+    all_responses = []
+    for i in tqdm(range(0, len(questions_contexts), BATCH_SIZE), desc="Processing batches"):
+        batch = questions_contexts[i:i+BATCH_SIZE]
+        
+        try:
+            # Generate responses for the batch
+            batch_responses = client.batch_generate_responses(batch, batch_size=BATCH_SIZE)
+            all_responses.extend(batch_responses)
+        except Exception as e:
+            print(f"Error in batch processing: {e}")
+            print("Falling back to individual processing...")
+            
+            # Fall back to individual processing
+            for question, context in batch:
+                try:
+                    response = client.generate_response(question, context)
+                    all_responses.append(response)
+                except Exception as e:
+                    print(f"Error generating response: {e}")
+                    all_responses.append("I couldn't find a good answer to this question.")
+    
+    # Update the DataFrame with responses
+    for index, response in enumerate(all_responses):
+        if index < len(df):
+            df.at[index, 'response'] = response
     
     output_path = data_path.replace("/", "_").split(".")[0] + "_truncated.csv"
     df.to_csv(output_path, index=False)

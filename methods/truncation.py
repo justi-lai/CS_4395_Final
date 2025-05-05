@@ -2,6 +2,9 @@ from transformers import AutoTokenizer
 from datasets import load_from_disk, Dataset
 import pandas as pd
 from methods.utils import OpenAIClient
+from tqdm import tqdm
+
+BATCH_SIZE = 4  # Adjust based on your GPU memory
 
 def truncation(data_path):
     """
@@ -14,33 +17,79 @@ def truncation(data_path):
     dataset = load_from_disk(data_path)
     client = OpenAIClient()
 
+    # Preprocess all examples
     processed_data = []
-    for example in dataset:
+    questions_contexts = []
+    metadata = []
+    
+    print("Preparing questions and contexts...")
+    for example in tqdm(dataset, desc="Truncating documents"):
         truncated_document = truncate_text(example['document'], client)
         
         questions = example['question']
         answers = example['answers']
-        question_responses = []
         
         # Ensure questions is a list
         if not isinstance(questions, list):
             questions = [questions]
             answers = [answers]
             
-        for question in questions:
-            response = client.generate_response(question, truncated_document)
-            question_responses.append(response)
+        for q_idx, question in enumerate(questions):
+            # Store for batch processing
+            questions_contexts.append((question, truncated_document))
+            metadata.append({
+                'document': example['document'],
+                'truncated_document': truncated_document,
+                'question': question,
+                'answer': answers[q_idx] if q_idx < len(answers) else None
+            })
+    
+    # Process in batches
+    print("Generating responses in batches...")
+    all_responses = []
+    for i in tqdm(range(0, len(questions_contexts), BATCH_SIZE), desc="Processing batches"):
+        batch = questions_contexts[i:i+BATCH_SIZE]
         
-        processed_example = {
-            'document': example['document'],
-            'truncated_document': truncated_document,
-            'question': questions,
-            'answers': answers,
-            'response': question_responses
-        }
-        processed_data.append(processed_example)
-
-    output_df = pd.DataFrame(processed_data)
+        try:
+            # Generate responses for the batch
+            batch_responses = client.batch_generate_responses(batch, batch_size=BATCH_SIZE)
+            all_responses.extend(batch_responses)
+        except Exception as e:
+            print(f"Error in batch processing: {e}")
+            print("Falling back to individual processing...")
+            
+            # Fall back to individual processing
+            for question, context in batch:
+                try:
+                    response = client.generate_response(question, context)
+                    all_responses.append(response)
+                except Exception as e:
+                    print(f"Error generating response: {e}")
+                    all_responses.append("I couldn't find a good answer to this question.")
+    
+    # Combine results
+    for i, response in enumerate(all_responses):
+        if i < len(metadata):
+            metadata[i]['response'] = response
+    
+    # Group by document to handle multiple questions per document
+    grouped_data = {}
+    for item in metadata:
+        doc_id = id(item['document'])  # Use the document's id as the key
+        if doc_id not in grouped_data:
+            grouped_data[doc_id] = {
+                'document': item['document'],
+                'truncated_document': item['truncated_document'],
+                'question': [],
+                'answers': [],
+                'response': []
+            }
+        
+        grouped_data[doc_id]['question'].append(item['question'])
+        grouped_data[doc_id]['answers'].append(item['answer'])
+        grouped_data[doc_id]['response'].append(item['response'])
+    
+    output_df = pd.DataFrame(list(grouped_data.values()))
     
     output_path = data_path.replace("/", "_").split(".")[0] + "_truncated.csv"
     output_df.to_csv(output_path, index=False)

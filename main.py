@@ -7,6 +7,7 @@ import pandas as pd
 from methods.truncation import truncation
 from methods.summarization import summarization
 from methods.rag import rag
+from methods.custom_rag import custom_rag
 from methods.graphrag import graphrag
 from bert_score import score
 import sacrebleu
@@ -14,11 +15,11 @@ from rouge_score import rouge_scorer
 import re
 
 def main():
-    chunk_size = 500
+    chunk_size = 300
 
     parser = argparse.ArgumentParser(description="""
             This script runs various retrieval methods on the NarrativeQA dataset.
-            The methods include truncation, summarization, RAG, and GraphRAG.
+            The methods include truncation, summarization, RAG, and CustomRAG.
             If no data file is specified, it will load a sample dataset.
             The script requires a Hugging Face token in the .env file for authentication.
             \n\n
@@ -33,28 +34,21 @@ def main():
             """)
     parser.add_argument('--method', required=True, help="Specify the retrieval method to use.")
     parser.add_argument('--chunk', type=int, default=chunk_size, help="Specify the maximum number of tokens (default: 500).")
-    parser.add_argument('--data', required=False, help="Specify the data file (optional).")
+    parser.add_argument('--sample_size', type=int, default=10, help="Specify the sample size for the dataset (default: 10).")
     
     args = parser.parse_args()
 
     load_dotenv()
     login(token=os.getenv("HUGGINGFACE_TOKEN"))
     
-    data_path = os.path.join(os.getcwd(), "data")
-    if args.data:
-        data_path = os.path.join(data_path, args.data)
-        if not os.path.exists(data_path):
-            raise FileNotFoundError(f"The file '{args.data}' does not exist in the data directory.")
-    else:
-        if not os.path.exists(os.path.join(data_path, "narrativeqa_arrow")):
-            load_data(data_path)
-        data_path = os.path.join(data_path, "narrativeqa_arrow")
+    data_path = os.path.join(os.getcwd(), "data", "narrativeqa_arrow")
+    load_data(data_path, args.sample_size)
     
     run_method(args.method, data_path, args.chunk)
 
-def run_method(method, data_path, chunk_size):
+def run_method(method, data_path, chunk_size, query=None):
     method = method.lower()
-    methods = ('truncation', 'summarization', 'rag', 'graphrag')
+    methods = ('truncation', 'summarization', 'rag', 'graphrag', 'custom_rag')
 
     if method not in methods:
         raise ValueError(f"Invalid method '{method}'. Choose from {methods}.")
@@ -70,13 +64,15 @@ def run_method(method, data_path, chunk_size):
         df = summarization(data_path, chunk_size=chunk_size)
     elif method == 'rag':
         df = rag(data_path, chunk_size=chunk_size)
+    elif method == 'custom_rag':
+        df = custom_rag(data_path, max_chunk_length=chunk_size)
     elif method == 'graphrag':
         df = graphrag(data_path, chunk_size=chunk_size)
     else:
         raise ValueError(f"Method '{method}' is not implemented.")
     
     if df is None:
-        raise ValueError("The method did not return a DataFrame. Please check the implementation.")
+        return
     
     evaluate(df)
 
@@ -211,31 +207,63 @@ def evaluate(df):
     for _, row in df.iterrows():
         # Extract reference answer
         if isinstance(row['answers'], list):
-            reference = row['answers'][0] if row['answers'] else ""
+            # If multiple answers, join them with space
+            reference = " ".join([str(ans) for ans in row['answers'] if ans and str(ans).strip()])
+        elif hasattr(row['answers'], 'size') and hasattr(row['answers'], 'tolist'):  # Check if it's a numpy array
+            # Convert numpy array to list of strings
+            answer_list = row['answers'].tolist() if hasattr(row['answers'], 'tolist') else [row['answers']]
+            reference = " ".join([str(ans) for ans in answer_list if ans and str(ans).strip()])
         else:
+            # For single string or other types
             reference = str(row['answers'])
         
-        # Extract model response
-        candidate = str(row['response']) if row['response'] is not None else ""
+        # Use empty reference as fallback if needed
+        if not reference or not reference.strip():
+            reference = "empty reference"
         
+        # Extract model response, ensure it's not empty
+        if isinstance(row['response'], list):
+            candidate = " ".join([str(r) for r in row['response'] if r and str(r).strip()])
+        else:
+            candidate = str(row['response']) if row['response'] is not None else ""
+        
+        # Use empty response as fallback if needed
+        if not candidate or not candidate.strip():
+            candidate = "empty response"
+        
+        # Add texts to our lists
         references.append(reference)
         candidates.append(candidate)
 
-    # Calculate BERTScore (if we have valid references and candidates)
-    if all(references) and all(candidates):
-        P, R, F1 = score(candidates, references, lang="en", verbose=True)
+    # Ensure we have valid data to compute scores
+    valid_pairs = [(r, c) for r, c in zip(references, candidates) 
+                  if r != "empty reference" and c != "empty response" 
+                  and len(r.strip()) > 0 and len(c.strip()) > 0]
+    
+    if valid_pairs:
+        valid_refs, valid_cands = zip(*valid_pairs)
         
-        # Convert to Python lists
-        bert_precision = P.tolist()
-        bert_recall = R.tolist()
-        bert_f1 = F1.tolist()
-        
-        # Calculate average BERTScore
-        avg_bert_precision = sum(bert_precision) / len(bert_precision)
-        avg_bert_recall = sum(bert_recall) / len(bert_recall)
-        avg_bert_f1 = sum(bert_f1) / len(bert_f1)
+        try:
+            # Calculate BERTScore with valid inputs
+            print(f"Computing BERTScore for {len(valid_pairs)} valid reference-candidate pairs...")
+            P, R, F1 = score(valid_cands, valid_refs, lang="en", verbose=True, model_type="microsoft/deberta-xlarge-mnli")
+            
+            # Convert to Python lists
+            bert_precision = P.tolist()
+            bert_recall = R.tolist()
+            bert_f1 = F1.tolist()
+            
+            # Calculate average BERTScore
+            avg_bert_precision = sum(bert_precision) / len(bert_precision)
+            avg_bert_recall = sum(bert_recall) / len(bert_recall)
+            avg_bert_f1 = sum(bert_f1) / len(bert_f1)
+        except Exception as e:
+            print(f"Error calculating BERTScore: {e}")
+            avg_bert_precision = 0
+            avg_bert_recall = 0
+            avg_bert_f1 = 0
     else:
-        print("Warning: Could not calculate BERTScore due to empty references or candidates")
+        print("Warning: Could not calculate BERTScore due to empty or invalid references/candidates")
         avg_bert_precision = 0
         avg_bert_recall = 0
         avg_bert_f1 = 0
@@ -289,20 +317,18 @@ def evaluate(df):
         }
     }
 
-def load_data(data_path):
+def load_data(data_path, sample_size):
     ds = load_dataset("deepmind/narrativeqa", split="test")
-    small_sample = ds.select(range(10))
+    small_sample = ds.select(range(sample_size))
     
     small_sample = small_sample.map(transform_document, batched=False, remove_columns=small_sample.column_names)
     small_sample = small_sample.rename_column("document_text", "document")
     small_sample = small_sample.rename_column("question_text", "question")
     small_sample = small_sample.rename_column("answer_text", "answers")
 
-    path = os.path.join(data_path, "narrativeqa_arrow")
-
-    small_sample.save_to_disk(path)
+    small_sample.save_to_disk(data_path)
     
-    print(f"NarrativeQA saved to {path}.")
+    print(f"NarrativeQA saved to {data_path}.")
 
 def transform_document(document):
     """
